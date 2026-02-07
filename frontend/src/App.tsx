@@ -277,6 +277,7 @@ function App() {
         <TrialDetailModal
           nctId={selectedTrial}
           onClose={() => setSelectedTrial(null)}
+          onTrialChange={(nctId) => setSelectedTrial(nctId)}
         />
       )}
     </div>

@@ -28,7 +28,7 @@ export const getFilters = async (): Promise<FiltersResponse> => {
 };
 
 export const findSimilarTrials = async (nctId: string): Promise<SearchResponse> => {
-  const response = await api.get<SearchResponse>(`/trial/${nctId}/similar`);
+  const response = await api.get<SearchResponse>(`/similar/${nctId}`);
   return response.data;
 };
 

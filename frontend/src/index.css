@@ -28,6 +28,10 @@
   .badge {
     @apply px-3 py-1 rounded-full text-xs font-semibold inline-flex items-center gap-1;
   }
+
+  .badge-sm {
+    @apply px-2 py-0.5 rounded-full text-xs font-semibold inline-flex items-center;
+  }
   
   .badge-primary {
     @apply badge bg-primary-100 text-primary-700;

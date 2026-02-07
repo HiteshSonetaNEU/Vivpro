@@ -10,19 +10,24 @@ import {
   ExternalLink,
   Loader2,
   AlertCircle,
+  Sparkles,
 } from 'lucide-react';
-import type { TrialDetail } from '../types/trial';
-import { getTrialDetail } from '../services/api';
+import type { TrialDetail, Trial } from '../types/trial';
+import { getTrialDetail, findSimilarTrials } from '../services/api';
 
 interface TrialDetailModalProps {
   nctId: string;
   onClose: () => void;
+  onTrialChange: (nctId: string) => void;
 }
 
-export const TrialDetailModal: React.FC<TrialDetailModalProps> = ({ nctId, onClose }) => {
+export const TrialDetailModal: React.FC<TrialDetailModalProps> = ({ nctId, onClose, onTrialChange }) => {
   const [trial, setTrial] = useState<TrialDetail | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [similarTrials, setSimilarTrials] = useState<Trial[]>([]);
+  const [showingSimilar, setShowingSimilar] = useState(false);
+  const [loadingSimilar, setLoadingSimilar] = useState(false);
 
   useEffect(() => {
     const fetchTrial = async () => {
@@ -31,6 +36,9 @@ export const TrialDetailModal: React.FC<TrialDetailModalProps> = ({ nctId, onClo
         setError(null);
         const data = await getTrialDetail(nctId);
         setTrial(data);
+        // Reset similar trials when viewing a new trial
+        setSimilarTrials([]);
+        setShowingSimilar(false);
       } catch (err: any) {
         const errorMessage = err?.response?.data?.detail || 
                            err?.message || 
@@ -44,6 +52,24 @@ export const TrialDetailModal: React.FC<TrialDetailModalProps> = ({ nctId, onClo
 
     fetchTrial();
   }, [nctId]);
+
+  const handleShowSimilar = async () => {
+    if (similarTrials.length > 0) {
+      setShowingSimilar(!showingSimilar);
+      return;
+    }
+
+    try {
+      setLoadingSimilar(true);
+      const response = await findSimilarTrials(nctId);
+      setSimilarTrials(response.results);
+      setShowingSimilar(true);
+    } catch (err) {
+      console.error('Error fetching similar trials:', err);
+    } finally {
+      setLoadingSimilar(false);
+    }
+  };
 
   const getPhaseColor = (phase?: string) => {
     if (!phase) return 'badge-gray';
@@ -328,6 +354,75 @@ export const TrialDetailModal: React.FC<TrialDetailModalProps> = ({ nctId, onClo
                       +{trial.facilities.length - 10} more facilities
                     </p>
                   )}
+                </div>
+              )}
+
+              {/* Similar Trials Button */}
+              <div className="flex justify-center pt-4">
+                <button
+                  onClick={handleShowSimilar}
+                  disabled={loadingSimilar}
+                  className="btn-primary px-6 py-3 flex items-center gap-2"
+                >
+                  {loadingSimilar ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Loading Similar Cases...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-4 h-4" />
+                      <span>{showingSimilar ? 'Hide' : 'Show'} Similar Cases</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Similar Trials List */}
+              {showingSimilar && similarTrials.length > 0 && (
+                <div className="card p-6 border-t-4 border-primary-500">
+                  <h4 className="font-semibold text-slate-800 mb-4 flex items-center gap-2">
+                    <Sparkles className="w-5 h-5 text-primary-600" />
+                    Similar Clinical Trials ({similarTrials.length})
+                  </h4>
+                  <div className="space-y-3">
+                    {similarTrials.map((similarTrial) => (
+                      <button
+                        key={similarTrial.nct_id}
+                        onClick={() => {
+                          // Change to the similar trial
+                          onTrialChange(similarTrial.nct_id);
+                        }}
+                        className="w-full text-left p-4 bg-slate-50 hover:bg-primary-50 rounded-lg transition-colors border border-slate-200 hover:border-primary-300"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex-1">
+                            <h5 className="font-semibold text-slate-800 mb-1 hover:text-primary-700">
+                              {similarTrial.brief_title}
+                            </h5>
+                            <p className="text-xs text-slate-600 mb-2">{similarTrial.nct_id}</p>
+                            {similarTrial.brief_summaries_description && (
+                              <p className="text-sm text-slate-600 line-clamp-2">
+                                {similarTrial.brief_summaries_description}
+                              </p>
+                            )}
+                          </div>
+                          <div className="flex flex-col gap-1">
+                            {similarTrial.phase && (
+                              <span className={`badge-sm ${getPhaseColor(similarTrial.phase)}`}>
+                                {similarTrial.phase}
+                              </span>
+                            )}
+                            {similarTrial.overall_status && (
+                              <span className={`text-xs px-2 py-1 rounded-full ${getStatusColor(similarTrial.overall_status)}`}>
+                                {formatStatus(similarTrial.overall_status)}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
