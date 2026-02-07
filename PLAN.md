@@ -2,9 +2,11 @@
 
 ## 1. Project Overview
 
-**Goal:** Build a full-stack, production-ready application that enables intelligent search over **1,000 clinical trial records** sourced from `clinical_trials.json`.
+**Goal:** Build a full-stack, production-ready application that enables intelligent search over **1,000+ clinical trial records** sourced from `clinical_trials.json`.
 
 **Context:** 12-hour hackathon (~7–8 hours of build time). Evaluated by technical mentors and a non-technical CEO. Every technical decision must be justifiable.
+
+**⚠️ Critical Mentor Feedback:** Implement data preprocessing & validation BEFORE ingesting into Elasticsearch (see Section 5).
 
 ---
 
@@ -226,7 +228,321 @@ This rich structure allows us to:
 
 ---
 
-## 5. Elasticsearch Index Design
+## 5. Data Preprocessing & Validation (Critical!)
+
+**Mentor Feedback:** Handle data issues BEFORE ingesting into Elasticsearch.
+
+### Why Preprocessing Matters
+
+Real-world data is messy. Before indexing, we must:
+- ✅ Validate required fields
+- ✅ Handle missing/null values
+- ✅ Sanitize malformed data
+- ✅ Normalize inconsistent formats
+- ✅ Log issues for debugging
+
+**If we skip this:** Ingestion fails mid-way, or worse — bad data gets indexed and breaks search.
+
+---
+
+### Data Quality Issues We Expect
+
+| Issue Type | Example | Impact |
+|---|---|---|
+| **Missing required fields** | No `nct_id` | Can't uniquely identify trial → skip record |
+| **Null/empty nested arrays** | `conditions: null` | ES expects array → use `[]` |
+| **Malformed dates** | `"2025-13-45"` | Invalid date → set to `null` |
+| **Encoding issues** | `"Brest C\x00ancer"` | Null bytes crash ES → sanitize |
+| **Wrong data types** | `enrollment: "540"` (string) | ES expects integer → convert |
+| **Empty strings in keyword fields** | `phase: ""` | Use `"NA"` or `null` |
+| **Nested objects with missing keys** | `{"name": null}` in conditions | Remove or fill with default |
+| **Very long text fields** | Description > 32KB | Truncate (ES has size limits) |
+
+---
+
+### Preprocessing Pipeline
+
+```python
+# backend/data_preprocessing.py
+
+import json
+import logging
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+class DataPreprocessor:
+    """Preprocess clinical trial data before Elasticsearch ingestion."""
+    
+    def __init__(self):
+        self.stats = {
+            "total_records": 0,
+            "valid_records": 0,
+            "skipped_records": 0,
+            "warnings": []
+        }
+    
+    def preprocess_trial(self, trial: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Preprocess a single trial record.
+        Returns cleaned record or None if invalid.
+        """
+        self.stats["total_records"] += 1
+        
+        try:
+            # 1. Validate required fields
+            if not self._validate_required_fields(trial):
+                return None
+            
+            # 2. Clean text fields
+            trial = self._clean_text_fields(trial)
+            
+            # 3. Normalize dates
+            trial = self._normalize_dates(trial)
+            
+            # 4. Clean nested arrays
+            trial = self._clean_nested_arrays(trial)
+            
+            # 5. Convert data types
+            trial = self._convert_data_types(trial)
+            
+            # 6. Handle missing values
+            trial = self._handle_missing_values(trial)
+            
+            self.stats["valid_records"] += 1
+            return trial
+            
+        except Exception as e:
+            logger.error(f"Failed to preprocess trial {trial.get('nct_id', 'UNKNOWN')}: {e}")
+            self.stats["skipped_records"] += 1
+            return None
+    
+    def _validate_required_fields(self, trial: Dict) -> bool:
+        """Ensure critical fields exist."""
+        required = ["nct_id"]
+        
+        for field in required:
+            if not trial.get(field):
+                logger.warning(f"Missing required field '{field}', skipping record")
+                self.stats["skipped_records"] += 1
+                return False
+        
+        return True
+    
+    def _clean_text_fields(self, trial: Dict) -> Dict:
+        """Remove null bytes, excessive whitespace, control characters."""
+        text_fields = [
+            "brief_title", "official_title", "brief_summaries_description", 
+            "detailed_description", "intervention_model_description"
+        ]
+        
+        for field in text_fields:
+            if trial.get(field):
+                text = trial[field]
+                if isinstance(text, str):
+                    # Remove null bytes
+                    text = text.replace('\x00', '')
+                    # Remove other control characters (except newlines/tabs)
+                    text = ''.join(char for char in text if ord(char) >= 32 or char in '\n\r\t')
+                    # Normalize whitespace
+                    text = ' '.join(text.split())
+                    # Truncate if too long (ES limit is 32KB, use 30KB to be safe)
+                    if len(text) > 30000:
+                        text = text[:30000] + "... [truncated]"
+                        self.stats["warnings"].append(f"{trial['nct_id']}: Truncated {field}")
+                    
+                    trial[field] = text if text else None
+        
+        return trial
+    
+    def _normalize_dates(self, trial: Dict) -> Dict:
+        """Parse and validate date fields."""
+        date_fields = [
+            "study_first_submitted_date", "last_update_submitted_date",
+            "last_update_posted_date", "results_first_posted_date",
+            "start_date", "completion_date", "primary_completion_date"
+        ]
+        
+        for field in date_fields:
+            if trial.get(field):
+                try:
+                    # Try parsing the date
+                    if isinstance(trial[field], str):
+                        # Handle ISO format
+                        datetime.fromisoformat(trial[field].replace('Z', '+00:00'))
+                    # Keep as-is if valid
+                except (ValueError, AttributeError):
+                    logger.warning(f"{trial['nct_id']}: Invalid date in {field}: {trial[field]}")
+                    trial[field] = None
+        
+        return trial
+    
+    def _clean_nested_arrays(self, trial: Dict) -> Dict:
+        """Clean nested object arrays (conditions, interventions, etc.)."""
+        nested_fields = [
+            "conditions", "interventions", "sponsors", "facilities", 
+            "design_outcomes", "age", "keywords", "id_information",
+            "browse_conditions", "browse_interventions", "design_groups",
+            "adverse_events", "submissions", "documents"
+        ]
+        
+        for field in nested_fields:
+            if field not in trial:
+                trial[field] = []
+            elif trial[field] is None:
+                trial[field] = []
+            elif not isinstance(trial[field], list):
+                logger.warning(f"{trial['nct_id']}: {field} is not a list, converting")
+                trial[field] = [trial[field]] if trial[field] else []
+            else:
+                # Remove null entries and validate objects
+                cleaned = []
+                for item in trial[field]:
+                    if item is not None and isinstance(item, dict):
+                        # Remove entries with all null values
+                        if any(v is not None and v != "" for v in item.values()):
+                            cleaned.append(item)
+                trial[field] = cleaned
+        
+        return trial
+    
+    def _convert_data_types(self, trial: Dict) -> Dict:
+        """Convert fields to expected types."""
+        
+        # Integer fields
+        if trial.get("enrollment"):
+            try:
+                # Handle "None" strings
+                if trial["enrollment"] in ["None", "NA", ""]:
+                    trial["enrollment"] = None
+                else:
+                    trial["enrollment"] = int(str(trial["enrollment"]).replace(",", ""))
+            except (ValueError, TypeError):
+                trial["enrollment"] = None
+        
+        # Boolean fields
+        bool_fields = [
+            "healthy_volunteers", "has_results", "has_dmc",
+            "subject_masked", "caregiver_masked", "investigator_masked",
+            "outcomes_assessor_masked"
+        ]
+        
+        for field in bool_fields:
+            if trial.get(field) is not None:
+                if isinstance(trial[field], (int, float)):
+                    trial[field] = bool(trial[field])
+                elif isinstance(trial[field], str):
+                    trial[field] = trial[field].lower() in ["true", "yes", "1"]
+        
+        # Integer count fields
+        int_fields = ["number_of_arms", "number_of_groups", "document_count", "document_total_page_count"]
+        for field in int_fields:
+            if trial.get(field):
+                try:
+                    if trial[field] == "None":
+                        trial[field] = None
+                    else:
+                        trial[field] = int(trial[field])
+                except (ValueError, TypeError):
+                    trial[field] = None
+        
+        return trial
+    
+    def _handle_missing_values(self, trial: Dict) -> Dict:
+        """Set defaults for missing categorical fields."""
+        
+        # Keyword fields that shouldn't be empty strings
+        keyword_fields = {
+            "study_type": "NA",
+            "phase": "NA",
+            "overall_status": "UNKNOWN",
+            "gender": "ALL",
+            "allocation": "NA",
+            "intervention_model": "NA",
+            "observational_model": "NA",
+            "primary_purpose": "NA",
+            "masking": "NA"
+        }
+        
+        for field, default in keyword_fields.items():
+            if not trial.get(field) or trial[field] == "":
+                trial[field] = default
+        
+        return trial
+    
+    def get_stats(self) -> Dict:
+        """Return preprocessing statistics."""
+        return self.stats
+
+
+# Usage in ingest.py
+def ingest_data():
+    preprocessor = DataPreprocessor()
+    
+    with open("clinical_trials.json", "r", encoding="utf-8") as f:
+        data = json.load(f)
+    
+    logger.info(f"Loaded {len(data)} records from JSON")
+    
+    # Preprocess all records
+    cleaned_trials = []
+    for trial in data:
+        cleaned = preprocessor.preprocess_trial(trial)
+        if cleaned:
+            cleaned_trials.append(cleaned)
+    
+    # Log statistics
+    stats = preprocessor.get_stats()
+    logger.info(f"""
+    Preprocessing Complete:
+    - Total records: {stats['total_records']}
+    - Valid records: {stats['valid_records']}
+    - Skipped records: {stats['skipped_records']}
+    - Warnings: {len(stats['warnings'])}
+    """)
+    
+    # Bulk index to ES
+    bulk_index_to_elasticsearch(cleaned_trials)
+```
+
+---
+
+### Preprocessing Checklist
+
+Before ingestion, we must handle:
+
+- ✅ **Required field validation** (nct_id must exist)
+- ✅ **Text sanitization** (remove null bytes, control characters)
+- ✅ **Text truncation** (ES has 32KB limit per field)
+- ✅ **Date validation** (parse ISO dates, set invalid to null)
+- ✅ **Nested array validation** (ensure all nested fields are arrays, not null)
+- ✅ **Remove empty objects** (e.g., `{name: null}` in conditions)
+- ✅ **Type conversion** (enrollment string → integer)
+- ✅ **Boolean normalization** (1.0 → true, "Yes" → true)
+- ✅ **Empty string handling** (phase: "" → "NA")
+- ✅ **Logging & statistics** (track how many records were cleaned/skipped)
+
+---
+
+### Testing Preprocessing
+
+```python
+# Quick test before full ingestion
+sample = data[0]
+print("Original:", sample.get('enrollment'), type(sample.get('enrollment')))
+
+cleaned = preprocessor.preprocess_trial(sample)
+print("Cleaned:", cleaned.get('enrollment'), type(cleaned.get('enrollment')))
+
+# Check nested arrays
+print("Conditions:", cleaned.get('conditions'))
+print("Interventions:", cleaned.get('interventions'))
+```
+
+---
+
+## 6. Elasticsearch Index Design
 
 ### Mapping Strategy
 
@@ -371,7 +687,7 @@ Also supports date math: `"gte": "now-1y"` (trials starting in the last year)
 
 ---
 
-## 6. Why We SHOULD Use OpenAI LLM for NLP (Updated Decision)
+## 7. Why We SHOULD Use OpenAI LLM for NLP (Updated Decision)
 
 ### The Mentor's Insight: Exact Match → Similar Fallback
 
@@ -546,7 +862,7 @@ def search_trials(query: str):
 
 ---
 
-## 7. Updated Risk Register & Mitigations
+## 8. Updated Risk Register & Mitigations
 
 | Risk | Impact | Likelihood | Mitigation |
 |---|---|---|---|
@@ -561,7 +877,7 @@ def search_trials(query: str):
 
 ---
 
-## 8. Folder Structure (Proposed)
+## 9. Folder Structure (Proposed)
 
 ```
 vivpro/
@@ -572,9 +888,10 @@ vivpro/
 │   ├── config.py               # ES connection config + OpenAI API key
 │   ├── models.py               # Pydantic schemas
 │   ├── es_client.py            # Elasticsearch client wrapper
+│   ├── data_preprocessing.py   # Data cleaning & validation (NEW!)
 │   ├── openai_service.py       # OpenAI query parsing + embeddings
 │   ├── query_builder.py        # Build ES queries from extracted entities
-│   ├── ingest.py               # Data loading script (+ optional embeddings)
+│   ├── ingest.py               # Data loading script (uses preprocessing)
 │   ├── routers/
 │   │   ├── search.py           # Intelligent search endpoint
 │   │   └── trials.py           # Single trial detail + metadata
@@ -602,11 +919,11 @@ vivpro/
 
 ---
 
-## 9. Updated Hour-by-Hour Execution Plan
+## 10. Updated Hour-by-Hour Execution Plan
 
 | Hour | Goal | Deliverable | Checkpoint |
 |---|---|---|---|
-| **1** | Infra + Data | ES running in Docker, data ingested with proper mapping, basic query works in Kibana/curl | Can search "asthma" via curl and get results |
+| **1** | Infra + Data Preprocessing + Ingestion | ES running in Docker, **data cleaning/validation implemented**, all records preprocessed and ingested with proper mapping, basic query works in Kibana/curl | Can search "asthma" via curl and get results. Preprocessing logs show stats (valid/skipped records). |
 | **2** | Backend API + OpenAI Integration | FastAPI with OpenAI query parsing, `/search` endpoint that extracts entities and queries ES | Swagger UI: send "Phase 2 cancer trials" → returns structured entities + results |
 | **3** | Frontend Shell | React app with search bar, results display (exact + similar sections), basic detail view | End-to-end: type query → see exact matches → see similar suggestions → click for details |
 | **4** | Smart Search Features | Fuzzy matching, highlighting, field boosting, fallback logic (exact → relaxed → similar) | Search with typos works. Empty exact results show similar trials. |
@@ -617,7 +934,10 @@ vivpro/
 
 ---
 
-## 10. Key Technical Decisions to Defend
+## 11. Key Technical Decisions to Defend
+
+0. **"Why preprocess data before ingesting?"**
+   → Real-world data is messy. Without preprocessing: (1) Ingestion fails on malformed records, (2) Bad data gets indexed and breaks search, (3) Inconsistent data types cause query errors, (4) Null bytes crash Elasticsearch. Preprocessing ensures data quality, logs issues for debugging, and guarantees reliable search. **Production-grade practice.**
 
 1. **"Why Elasticsearch instead of PostgreSQL full-text search?"**
    → ES gives us fuzzy matching, nested document queries (for multi-value fields like conditions/interventions), aggregations for facets, highlighting, and optional vector search — all out of the box. Postgres FTS would require custom implementations for each. ES is purpose-built for this use case.
