@@ -1,82 +1,179 @@
-from flask import Flask, jsonify
-from flask_cors import CORS
-from config import Config
-from elasticsearch import Elasticsearch
+"""
+FastAPI application for Clinical Trials Search.
+"""
+
+import logging
 import time
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from elasticsearch import Elasticsearch
+from config import Config
 
-app = Flask(__name__)
-app.config.from_object(Config)
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-# Enable CORS
-CORS(app, origins=app.config['CORS_ORIGINS'])
-
-# Initialize Elasticsearch client
+# Global Elasticsearch client
 es_client = None
 
-def init_elasticsearch():
-    """Initialize Elasticsearch connection with retry logic"""
-    global es_client
-    max_retries = 5
-    retry_delay = 5
-    
+
+def connect_elasticsearch(max_retries=5, retry_delay=2) -> Elasticsearch:
+    """Connect to Elasticsearch with retry logic."""
     for attempt in range(max_retries):
         try:
-            es_client = Elasticsearch(
-                [app.config['ELASTICSEARCH_HOST']],
-                request_timeout=30
+            client = Elasticsearch(
+                [Config.ELASTICSEARCH_HOST],
+                verify_certs=False
             )
-            if es_client.ping():
-                print(f"✓ Connected to Elasticsearch at {app.config['ELASTICSEARCH_HOST']}")
-                return True
+            
+            # Test connection
+            if client.ping():
+                info = client.info()
+                logger.info(f"✓ Connected to Elasticsearch cluster: {info['cluster_name']}")
+                logger.info(f"✓ Elasticsearch version: {info['version']['number']}")
+                return client
             else:
-                print(f"✗ Elasticsearch ping failed (attempt {attempt + 1}/{max_retries})")
+                logger.warning(f"Elasticsearch ping failed (attempt {attempt + 1}/{max_retries})")
         except Exception as e:
-            print(f"✗ Elasticsearch connection error (attempt {attempt + 1}/{max_retries}): {e}")
+            logger.warning(f"Failed to connect to Elasticsearch (attempt {attempt + 1}/{max_retries}): {e}")
         
         if attempt < max_retries - 1:
-            print(f"  Retrying in {retry_delay} seconds...")
+            logger.info(f"Retrying in {retry_delay} seconds...")
             time.sleep(retry_delay)
     
-    print("✗ Failed to connect to Elasticsearch after multiple attempts")
-    return False
+    raise ConnectionError("Failed to connect to Elasticsearch after maximum retries")
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    """Health check endpoint"""
-    es_status = 'connected' if es_client and es_client.ping() else 'disconnected'
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifecycle manager for FastAPI app."""
+    global es_client
     
-    return jsonify({
-        'status': 'ok',
-        'elasticsearch': es_status,
-        'environment': app.config['FLASK_ENV']
-    }), 200
+    # Startup
+    logger.info("Starting Clinical Trials Search API...")
+    try:
+        es_client = connect_elasticsearch()
+        logger.info("✓ Application startup complete")
+    except Exception as e:
+        logger.error(f"✗ Failed to initialize application: {e}")
+        raise
+    
+    yield
+    
+    # Shutdown
+    logger.info("Shutting down Clinical Trials Search API...")
+    if es_client:
+        es_client.close()
+        logger.info("✓ Elasticsearch connection closed")
 
-@app.route('/', methods=['GET'])
-def index():
-    """Root endpoint"""
-    return jsonify({
+
+# Initialize FastAPI app
+app = FastAPI(
+    title="Clinical Trials Search API",
+    description="Intelligent search over clinical trials using NLP and Elasticsearch",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=Config.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/")
+async def root():
+    """Root endpoint."""
+    return {
         'message': 'Clinical Trials Search API',
         'version': '1.0.0',
+        'status': 'running',
+        'elasticsearch': 'connected' if es_client and es_client.ping() else 'disconnected',
+        'docs': '/docs',
         'endpoints': {
             'health': '/health',
-            'search': '/api/search (coming soon)',
-            'trial': '/api/trial/<nct_id> (coming soon)',
-            'filters': '/api/filters (coming soon)'
+            'status': '/api/status',
+            'search': '/api/search',
+            'trial': '/api/trial/{nct_id}',
+            'filters': '/api/filters'
         }
-    }), 200
+    }
 
-if __name__ == '__main__':
-    print("=" * 60)
-    print("Clinical Trials Search API - Starting...")
-    print("=" * 60)
-    
-    # Initialize Elasticsearch
-    if init_elasticsearch():
-        print("\n✓ Flask API ready to serve requests")
-    else:
-        print("\n⚠ Flask API starting without Elasticsearch connection")
-    
-    print(f"\nServer running on: http://0.0.0.0:5000")
-    print("=" * 60)
-    
-    app.run(host='0.0.0.0', port=5000, debug=app.config['DEBUG'])
+
+@app.get("/health")
+async def health():
+    """Health check endpoint."""
+    try:
+        es_status = 'connected' if es_client and es_client.ping() else 'disconnected'
+        
+        health_status = {
+            'status': 'healthy' if es_status == 'connected' else 'unhealthy',
+            'elasticsearch': es_status,
+            'timestamp': time.time()
+        }
+        
+        if es_status != 'connected':
+            raise HTTPException(status_code=503, detail="Elasticsearch unavailable")
+        
+        return health_status
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        raise HTTPException(status_code=503, detail="Service unhealthy")
+
+
+@app.get("/api/status")
+async def api_status():
+    """API status endpoint with detailed information."""
+    try:
+        # Get ES cluster health
+        cluster_health = es_client.cluster.health() if es_client else None
+        
+        # Get index stats
+        index_stats = None
+        if es_client:
+            try:
+                count_response = es_client.count(index='clinical_trials')
+                index_stats = {
+                    'index_name': 'clinical_trials',
+                    'document_count': count_response['count']
+                }
+            except:
+                index_stats = {'error': 'Index not found or unavailable'}
+        
+        return {
+            'api_version': '1.0.0',
+            'status': 'operational',
+            'elasticsearch': {
+                'connected': es_client is not None and es_client.ping(),
+                'cluster_health': cluster_health['status'] if cluster_health else None,
+                'cluster_name': cluster_health['cluster_name'] if cluster_health else None
+            },
+            'index': index_stats,
+            'openai': {
+                'configured': bool(Config.OPENAI_API_KEY)
+            },
+            'timestamp': time.time()
+        }
+    except Exception as e:
+        logger.error(f"Status check failed: {e}")
+        return {
+            'api_version': '1.0.0',
+            'status': 'degraded',
+            'error': str(e),
+            'timestamp': time.time()
+        }
+
+
+def get_es_client() -> Elasticsearch:
+    """Get the Elasticsearch client instance."""
+    if es_client is None:
+        raise HTTPException(status_code=503, detail="Elasticsearch not connected")
+    return es_client
