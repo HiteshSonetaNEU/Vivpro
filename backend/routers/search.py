@@ -37,23 +37,43 @@ def get_es_client():
     },
     summary="Intelligent search for clinical trials",
     description="""
-    Search clinical trials using natural language queries.
+    Search clinical trials using natural language queries with optional filters.
     
     The endpoint uses AI (OpenAI GPT-4o-mini) to extract structured entities from your query,
     then constructs an optimized Elasticsearch query for relevant results.
     
-    Features:
+    **Features:**
     - Natural language processing for entity extraction
     - Intelligent query construction with relevance scoring
     - Fallback to basic full-text search if AI extraction fails
     - Pagination support
+    - Advanced filtering by phase, status, and location
     - Detailed search metadata in response
     
-    Examples:
+    **Filter Parameters:**
+    - `phases`: Array of trial phases (e.g., ["PHASE2", "PHASE3"])
+      - Valid values: PHASE1, PHASE2, PHASE3, PHASE4, PHASE1/PHASE2, PHASE2/PHASE3, NA
+    - `statuses`: Array of recruitment statuses (e.g., ["RECRUITING", "ACTIVE_NOT_RECRUITING"])
+      - Valid values: RECRUITING, NOT_YET_RECRUITING, ACTIVE_NOT_RECRUITING, COMPLETED, TERMINATED, SUSPENDED, WITHDRAWN
+    - `city`: Filter by facility location (e.g., "Boston" or "New York")
+    
+    **Query Examples:**
     - "Find Phase 2 breast cancer trials"
     - "Recruiting studies for diabetes with metformin"
     - "Completed COVID-19 vaccine trials"
     - "Phase 3 interventional trials for asthma"
+    
+    **With Filters Example:**
+    ```json
+    {
+      "query": "cancer treatment trials",
+      "page": 1,
+      "page_size": 10,
+      "phases": ["PHASE2", "PHASE3"],
+      "statuses": ["RECRUITING"],
+      "city": "Boston"
+    }
+    ```
     """
 )
 async def search_trials(request: SearchRequest) -> SearchResponse:
@@ -139,6 +159,47 @@ async def search_trials(request: SearchRequest) -> SearchResponse:
                 from_=from_offset
             )
             logger.info("Using basic full-text query (no AI extraction)")
+        
+        # Apply additional filters from request
+        if request.phases or request.statuses or request.city:
+            logger.info(f"Applying filters: phases={request.phases}, statuses={request.statuses}, city={request.city}")
+            filter_clauses = []
+            
+            if request.phases:
+                filter_clauses.append({"terms": {"phase": request.phases}})
+            
+            if request.statuses:
+                filter_clauses.append({"terms": {"overall_status": request.statuses}})
+            
+            if request.city:
+                filter_clauses.append({
+                    "nested": {
+                        "path": "facilities",
+                        "query": {
+                            "match": {
+                                "facilities.city": {
+                                    "query": request.city,
+                                    "fuzziness": "AUTO"
+                                }
+                            }
+                        }
+                    }
+                })
+            
+            # Wrap existing query in a bool with filters
+            if "query" in es_query:
+                es_query["query"] = {
+                    "bool": {
+                        "must": [es_query["query"]],
+                        "filter": filter_clauses
+                    }
+                }
+            else:
+                es_query["query"] = {
+                    "bool": {
+                        "filter": filter_clauses
+                    }
+                }
         
         logger.debug(f"Elasticsearch query: {es_query}")
         

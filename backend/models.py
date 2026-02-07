@@ -41,6 +41,26 @@ class SearchRequest(BaseModel):
         description="Whether to use OpenAI for entity extraction (fallback to basic search if False)"
     )
     
+    # Filter options
+    phases: Optional[List[str]] = Field(
+        default=None,
+        description="Filter by specific phases. Valid values: PHASE1, PHASE2, PHASE3, PHASE4, PHASE1/PHASE2, PHASE2/PHASE3, NA",
+        example=["PHASE2", "PHASE3"]
+    )
+    
+    statuses: Optional[List[str]] = Field(
+        default=None,
+        description="Filter by trial recruitment status. Valid values: RECRUITING, NOT_YET_RECRUITING, ACTIVE_NOT_RECRUITING, COMPLETED, TERMINATED, SUSPENDED, WITHDRAWN",
+        example=["RECRUITING", "ACTIVE_NOT_RECRUITING"]
+    )
+    
+    city: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        description="Filter by city where trial facilities are located (case-insensitive, fuzzy matching)",
+        example="Boston"
+    )
+    
     @validator('query')
     def validate_query(cls, v):
         """Validate and sanitize query string."""
