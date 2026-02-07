@@ -1,13 +1,15 @@
 import React from 'react';
 import { Activity, Calendar, Users, MapPin, FileText, ChevronRight } from 'lucide-react';
 import type { Trial } from '../types/trial';
+import { highlightText } from '../utils/highlightText';
 
 interface TrialCardProps {
   trial: Trial;
   onClick: () => void;
+  searchQuery?: string;
 }
 
-export const TrialCard: React.FC<TrialCardProps> = ({ trial, onClick }) => {
+export const TrialCard: React.FC<TrialCardProps> = ({ trial, onClick, searchQuery }) => {
   const getPhaseColor = (phase?: string) => {
     if (!phase) return 'badge-gray';
     const phaseMap: Record<string, string> = {
@@ -64,13 +66,13 @@ export const TrialCard: React.FC<TrialCardProps> = ({ trial, onClick }) => {
 
       {/* Title */}
       <h3 className="text-lg font-bold text-slate-800 mb-2 line-clamp-2 group-hover:text-primary-700 transition-colors">
-        {trial.brief_title}
+        {searchQuery ? highlightText(trial.brief_title, searchQuery) : trial.brief_title}
       </h3>
 
       {/* Description */}
       {trial.brief_summaries_description && (
         <p className="text-sm text-slate-600 mb-4 line-clamp-2">
-          {trial.brief_summaries_description}
+          {searchQuery ? highlightText(trial.brief_summaries_description, searchQuery) : trial.brief_summaries_description}
         </p>
       )}
 

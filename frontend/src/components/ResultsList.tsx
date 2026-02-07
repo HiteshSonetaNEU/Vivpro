@@ -13,6 +13,7 @@ interface ResultsListProps {
   onTrialClick: (trial: Trial) => void;
   isLoading?: boolean;
   searchType?: string;
+  searchQuery?: string;
 }
 
 export const ResultsList: React.FC<ResultsListProps> = ({
@@ -24,6 +25,7 @@ export const ResultsList: React.FC<ResultsListProps> = ({
   onTrialClick,
   isLoading = false,
   searchType,
+  searchQuery,
 }) => {
   if (trials.length === 0) {
     return (
@@ -70,6 +72,7 @@ export const ResultsList: React.FC<ResultsListProps> = ({
             key={trial.nct_id}
             trial={trial}
             onClick={() => onTrialClick(trial)}
+            searchQuery={searchQuery}
           />
         ))}
       </div>

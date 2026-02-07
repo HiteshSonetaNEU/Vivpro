@@ -224,6 +224,7 @@ function App() {
                 onPageChange={handlePageChange}
                 onTrialClick={handleTrialClick}
                 searchType={searchResults.search_type}
+                searchQuery={currentQuery}
               />
             )}
 
