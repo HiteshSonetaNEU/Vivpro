@@ -7,8 +7,9 @@ import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from elasticsearch import Elasticsearch
+from elasticsearch import AsyncElasticsearch
 from config import Config
+from routers import search
 
 # Configure logging
 logging.basicConfig(
@@ -21,18 +22,18 @@ logger = logging.getLogger(__name__)
 es_client = None
 
 
-def connect_elasticsearch(max_retries=5, retry_delay=2) -> Elasticsearch:
+async def connect_elasticsearch(max_retries=5, retry_delay=2) -> AsyncElasticsearch:
     """Connect to Elasticsearch with retry logic."""
     for attempt in range(max_retries):
         try:
-            client = Elasticsearch(
+            client = AsyncElasticsearch(
                 [Config.ELASTICSEARCH_HOST],
                 verify_certs=False
             )
             
             # Test connection
-            if client.ping():
-                info = client.info()
+            if await client.ping():
+                info = await client.info()
                 logger.info(f"✓ Connected to Elasticsearch cluster: {info['cluster_name']}")
                 logger.info(f"✓ Elasticsearch version: {info['version']['number']}")
                 return client
@@ -56,7 +57,7 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting Clinical Trials Search API...")
     try:
-        es_client = connect_elasticsearch()
+        es_client = await connect_elasticsearch()
         logger.info("✓ Application startup complete")
     except Exception as e:
         logger.error(f"✗ Failed to initialize application: {e}")
@@ -67,7 +68,7 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down Clinical Trials Search API...")
     if es_client:
-        es_client.close()
+        await es_client.close()
         logger.info("✓ Elasticsearch connection closed")
 
 
@@ -88,15 +89,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Include routers
+app.include_router(search.router)
+
 
 @app.get("/")
 async def root():
     """Root endpoint."""
+    es_status = 'disconnected'
+    if es_client:
+        try:
+            es_status = 'connected' if await es_client.ping() else 'disconnected'
+        except:
+            pass
+    
     return {
         'message': 'Clinical Trials Search API',
         'version': '1.0.0',
         'status': 'running',
-        'elasticsearch': 'connected' if es_client and es_client.ping() else 'disconnected',
+        'elasticsearch': es_status,
         'docs': '/docs',
         'endpoints': {
             'health': '/health',
@@ -112,7 +123,12 @@ async def root():
 async def health():
     """Health check endpoint."""
     try:
-        es_status = 'connected' if es_client and es_client.ping() else 'disconnected'
+        es_status = 'disconnected'
+        if es_client:
+            try:
+                es_status = 'connected' if await es_client.ping() else 'disconnected'
+            except:
+                es_status = 'disconnected'
         
         health_status = {
             'status': 'healthy' if es_status == 'connected' else 'unhealthy',
@@ -134,13 +150,20 @@ async def api_status():
     """API status endpoint with detailed information."""
     try:
         # Get ES cluster health
-        cluster_health = es_client.cluster.health() if es_client else None
+        cluster_health = None
+        es_connected = False
+        if es_client:
+            try:
+                cluster_health = await es_client.cluster.health()
+                es_connected = await es_client.ping()
+            except:
+                pass
         
         # Get index stats
         index_stats = None
         if es_client:
             try:
-                count_response = es_client.count(index='clinical_trials')
+                count_response = await es_client.count(index='clinical_trials')
                 index_stats = {
                     'index_name': 'clinical_trials',
                     'document_count': count_response['count']
@@ -152,7 +175,7 @@ async def api_status():
             'api_version': '1.0.0',
             'status': 'operational',
             'elasticsearch': {
-                'connected': es_client is not None and es_client.ping(),
+                'connected': es_connected,
                 'cluster_health': cluster_health['status'] if cluster_health else None,
                 'cluster_name': cluster_health['cluster_name'] if cluster_health else None
             },
@@ -172,7 +195,7 @@ async def api_status():
         }
 
 
-def get_es_client() -> Elasticsearch:
+def get_es_client() -> AsyncElasticsearch:
     """Get the Elasticsearch client instance."""
     if es_client is None:
         raise HTTPException(status_code=503, detail="Elasticsearch not connected")
