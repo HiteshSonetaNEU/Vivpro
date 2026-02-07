@@ -31,6 +31,7 @@ services:
       - FLASK_ENV=development
       - ELASTICSEARCH_HOST=http://elasticsearch:9200
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - PYTHONUNBUFFERED=1
     ports:
       - "5000:5000"
     depends_on:

@@ -80,13 +80,57 @@ vivpro/
 └── README.md                   # This file
 ```
 
+## Data Ingestion
+
+After starting the services, ingest the clinical trials data:
+
+### Option 1: Using Python script (Recommended)
+```bash
+python run_ingestion.py
+```
+
+### Option 2: Direct Docker command
+```bash
+docker exec vivpro-flask-api python ingest.py
+```
+
+### Option 3: Inside the container
+```bash
+docker exec -it vivpro-flask-api bash
+python ingest.py
+exit
+```
+
+The ingestion script will:
+1. ✅ Connect to Elasticsearch
+2. ✅ Load 1,000 clinical trials from `clinical_trials.json`
+3. ✅ Preprocess data (validate, clean, normalize)
+4. ✅ Create index with proper mapping
+5. ✅ Bulk index all records
+6. ✅ Verify ingestion with sample queries
+
+Expected output: ~1000 documents successfully indexed
+
+### Verify Data
+
+```bash
+# Count all documents
+curl http://localhost:9200/clinical_trials/_count
+
+# Search for cancer trials
+curl "http://localhost:9200/clinical_trials/_search?q=cancer&size=5"
+
+# Get specific trial
+curl http://localhost:9200/clinical_trials/_doc/NCT00000105
+```
+
 ## Next Steps
 
-1. Implement data preprocessing (`backend/data_preprocessing.py`)
-2. Implement OpenAI service (`backend/openai_service.py`)
-3. Implement query builder (`backend/query_builder.py`)
-4. Create Elasticsearch index with mapping
-5. Ingest preprocessed data
+1. ✅ Data preprocessing - COMPLETE
+2. ✅ ES index creation - COMPLETE  
+3. ✅ Data ingestion - COMPLETE
+4. Implement OpenAI service (`backend/openai_service.py`)
+5. Implement query builder (`backend/query_builder.py`)
 6. Implement search endpoints
 7. Build frontend (React)
 
